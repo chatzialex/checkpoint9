@@ -1,0 +1,11 @@
+<launch>
+    <arg name="use_sim_time" default="true"/>
+    <arg name="obstacle" default="0.5"/>
+    <arg name="degrees" default="0.0"/> 
+
+    <node pkg="attach_shelf" exec="pre_approach" name="pre_approach">
+        <param name="use_sim_time" value="$(var use_sim_time)"/>
+        <param name="obstacle" value="$(var obstacle)"/>
+        <param name="degrees" value="$(var degrees)"/>
+    </node>
+</launch>
