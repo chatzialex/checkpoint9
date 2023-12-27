@@ -23,6 +23,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
 
 
 if(BUILD_TESTING)
@@ -44,8 +46,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 add_executable(pre_approach src/pre_approach.cpp)
 ament_target_dependencies(pre_approach rclcpp sensor_msgs geometry_msgs nav_msgs tf2)
 
+add_executable(approach_service_server src/approach_service_server.cpp)
+ament_target_dependencies(approach_service_server
+  rclcpp sensor_msgs geometry_msgs std_msgs tf2 tf2_ros tf2_eigen)
+rosidl_target_interfaces(approach_service_server
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
 install(
-  TARGETS pre_approach
+  TARGETS pre_approach approach_service_server
   DESTINATION lib/${PROJECT_NAME}/
 )
 
