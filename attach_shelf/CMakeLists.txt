@@ -21,7 +21,9 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
+
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -33,6 +35,11 @@ if(BUILD_TESTING)
   #set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/GoToLoading.srv"
+  DEPENDENCIES std_msgs
+)
 
 add_executable(pre_approach src/pre_approach.cpp)
 ament_target_dependencies(pre_approach rclcpp sensor_msgs geometry_msgs nav_msgs tf2)
