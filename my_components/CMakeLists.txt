@@ -66,9 +66,21 @@ rosidl_target_interfaces(attach_server
 rclcpp_components_register_nodes(attach_server "my_components::AttachServer")
 set(node_plugins "${node_plugins}my_components::AttachServer;$<TARGET_FILE:attach_server>\n")
 
+add_library(attach_client SHARED src/attach_client.cpp)
+target_compile_definitions(attach_client PRIVATE "COMPOSITION_BUILDING_DLL")
+ament_target_dependencies(attach_client
+  rclcpp
+  rclcpp_components
+)
+rosidl_target_interfaces(attach_client
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rclcpp_components_register_nodes(attach_client "my_components::AttachClient")
+set(node_plugins "${node_plugins}my_components::AttachClient;$<TARGET_FILE:attach_client>\n")
+
 install(TARGETS
   pre_approach
   attach_server
+  attach_client
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
