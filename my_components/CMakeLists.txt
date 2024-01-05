@@ -10,6 +10,10 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(composition REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -22,5 +26,25 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+include_directories(include)
+
+add_library(pre_approach SHARED src/pre_approach.cpp)
+target_compile_definitions(pre_approach PRIVATE "COMPOSITION_BUILDING_DLL")
+ament_target_dependencies(pre_approach
+  rclcpp
+  rclcpp_components
+  geometry_msgs
+  sensor_msgs
+  nav_msgs
+  tf2)
+rclcpp_components_register_nodes(pre_approach "my_components::PreApproach")
+set(node_plugins "${node_plugins}my_components::PreApproach;$<TARGET_FILE:pre_approach>\n")
+
+install(TARGETS
+  pre_approach
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ament_package()
