@@ -30,7 +30,7 @@ def generate_launch_description():
       name='my_container',
       namespace='',
       package='rclcpp_components',
-      executable='component_container',
+      executable='component_container_mt',
       composable_node_descriptions=[
         pre_approach_node,
         attach_server_node,

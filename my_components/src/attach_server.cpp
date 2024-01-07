@@ -3,6 +3,7 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "my_components/srv/go_to_loading.hpp"
 #include "rclcpp/qos.hpp"
+#include "rmw/qos_profiles.h"
 #include "rmw/types.h"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/detail/string__struct.hpp"
@@ -21,10 +22,19 @@ namespace my_components {
 
 AttachServer::AttachServer(const rclcpp::NodeOptions &options)
     : Node{kNodeName, options},
+      group_1_{this->create_callback_group(
+          rclcpp::CallbackGroupType::MutuallyExclusive)},
+      group_2_{this->create_callback_group(
+          rclcpp::CallbackGroupType::MutuallyExclusive)},
       subscription_{this->create_subscription<LaserScan>(
           kScanTopicName, 1,
           std::bind(&AttachServer::subscription_cb, this,
-                    std::placeholders::_1))},
+                    std::placeholders::_1),
+          [this]() {
+            rclcpp::SubscriptionOptions options;
+            options.callback_group = group_1_;
+            return options;
+          }())},
       publisher_{this->create_publisher<Twist>(kCmdTopicName, 1)},
       elevator_up_publisher_{this->create_publisher<std_msgs::msg::String>(
           kElevatorUpTopicName,
@@ -41,12 +51,94 @@ AttachServer::AttachServer(const rclcpp::NodeOptions &options)
       service_{this->create_service<GoToLoading>(
           kServiceName,
           std::bind(&AttachServer::service_cb, this, std::placeholders::_1,
-                    std::placeholders::_2))} {
+                    std::placeholders::_2),
+          rmw_qos_profile_services_default, group_2_)} {
   RCLCPP_INFO(this->get_logger(), "Started %s service server.", kServiceName);
 }
 
 void AttachServer::subscription_cb(const std::shared_ptr<const LaserScan> msg) {
-  scan_ = *msg;
+  if (publish_mode_ == CenterPublishMode::Off) {
+    return;
+  }
+
+  const auto angleToIndex{[msg](float angle) {
+    return static_cast<size_t>(
+        std::ceil((angle - msg->angle_min) / msg->angle_increment));
+  }};
+
+  const auto i0{angleToIndex(kAngleRightMin)};
+  const auto i1{angleToIndex(0.0)};
+  const auto i2{angleToIndex(kAngleLeftMax)};
+
+  const auto compLegCenter{
+      [msg](size_t i_0,
+            size_t i_f) -> std::optional<std::pair<double, double>> {
+        size_t num_points{0};
+        double x{0.0};
+        double y{0.0};
+        double angle{};
+        for (auto i{i_0}; i < i_f; ++i) {
+          if (msg->range_min <= msg->ranges[i] &&
+              msg->ranges[i] <= msg->range_max &&
+              msg->intensities[i] >= kIntensityThreshold) {
+            angle = msg->angle_min + i * msg->angle_increment;
+            x += msg->ranges[i] * std::cos(angle);
+            y += -msg->ranges[i] * std::sin(angle);
+            ++num_points;
+          }
+        }
+        if (num_points) {
+          return {{x / num_points, y / num_points}};
+        } else {
+          return std::nullopt;
+        }
+      }};
+
+  const auto center_right{compLegCenter(i0, i1)};
+  const auto center_left{compLegCenter(i1, i2)};
+
+  if (!center_left) {
+    RCLCPP_WARN(this->get_logger(),
+                "[subscription_cb() Left leg not detected, returning.]");
+    return;
+  }
+  if (!center_right) {
+    RCLCPP_WARN(this->get_logger(),
+                "[subscription_cb() Right leg not detected, returning.]");
+    return;
+  }
+
+  Eigen::Isometry3d scan_to_center = Eigen::Isometry3d::Identity();
+  scan_to_center.translation() =
+      Eigen::Vector3d{(center_left->first + center_right->first) / 2,
+                      (center_left->second + center_right->second) / 2, 0};
+  Eigen::Vector3d y{center_left->first - center_right->first,
+                    center_left->second - center_right->second, 0};
+  y.normalize();
+  Eigen::Vector3d x{-y[1], y[0], 0};
+  Eigen::Vector3d z{0, 0, -1};
+  scan_to_center.linear() =
+      (Eigen::Matrix3d() << x, y, z).finished().transpose();
+
+  std::optional<Eigen::Isometry3d> pub_to_scan{
+      getTransform(kPublishFrame, kLaserFrame)};
+  if (!pub_to_scan) {
+    return;
+  }
+
+  Eigen::Isometry3d pub_to_center_tf{pub_to_scan.value() * scan_to_center};
+  geometry_msgs::msg::TransformStamped pub_to_center{
+      tf2::eigenToTransform(pub_to_center_tf)};
+  pub_to_center.header.stamp = this->get_clock()->now();
+  pub_to_center.header.frame_id = kPublishFrame;
+  pub_to_center.child_frame_id = kCartFrame;
+  tf_static_broadcaster_->sendTransform(pub_to_center);
+  tf_buffer_->setTransform(pub_to_center, "default_authority", true);
+  center_published_ = true;
+
+  if (publish_mode_ == CenterPublishMode::Once) {
+    publish_mode_ = CenterPublishMode::Off;
+  }
 }
 
 void AttachServer::service_cb(
@@ -58,34 +150,10 @@ void AttachServer::service_cb(
 
   // Publish center frame.
 
-  if (!scan_) {
-    RCLCPP_WARN(this->get_logger(), "Laser scan not received yet.");
-    return;
+  center_published_ = false;
+  publish_mode_ = CenterPublishMode::Once;
+  while (!center_published_) { /*spin*/
   }
-  std::optional<Eigen::Isometry3d> scan_to_center = compCenter();
-  if (!scan_to_center) {
-    return;
-  }
-  std::optional<Eigen::Isometry3d> odom_to_scan{
-      getTransform(kOdomFrame, kLaserFrame)};
-  if (!odom_to_scan) {
-    return;
-  }
-  std::optional<Eigen::Isometry3d> odom_to_base_footprint{
-      getTransform(kOdomFrame, kBaseLinkFrame)};
-  if (!odom_to_base_footprint) {
-    return;
-  }
-
-  Eigen::Isometry3d odom_to_center_tf{odom_to_scan.value() *
-                                      scan_to_center.value()};
-  geometry_msgs::msg::TransformStamped odom_to_center{
-      tf2::eigenToTransform(odom_to_center_tf)};
-  odom_to_center.header.stamp = this->get_clock()->now();
-  odom_to_center.header.frame_id = kOdomFrame;
-  odom_to_center.child_frame_id = kCartFrame;
-  tf_static_broadcaster_->sendTransform(odom_to_center);
-  tf_buffer_->setTransform(odom_to_center, "default_authority", true);
 
   // Perform the movement if requested.
   const auto get_fist_goal{
@@ -114,7 +182,7 @@ void AttachServer::service_cb(
     }
   }};
 
-  if (!req->attach_to_shelf) {
+  if (/*!req->attach_to_shelf*/ true) {
     goto end;
   }
 
@@ -141,6 +209,7 @@ void AttachServer::service_cb(
 
 end:
   RCLCPP_INFO(this->get_logger(), "Done.");
+  publish_mode_ = CenterPublishMode::Off;
   res->complete = true;
 }
 
@@ -190,60 +259,6 @@ bool AttachServer::moveToGoal(
     msg.linear.x = kKpDdistance * error_distance;
     publisher_->publish(msg);
     std::this_thread::sleep_for(kTimerPeriod);
-  }
-}
-
-std::optional<Eigen::Isometry3d> AttachServer::compCenter() {
-  const auto angleToIndex{[this](float angle) {
-    return static_cast<size_t>(
-        std::ceil((angle - scan_->angle_min) / scan_->angle_increment));
-  }};
-
-  const auto i0{angleToIndex(kAngleRightMin)};
-  const auto i1{angleToIndex(0.0)};
-  const auto i2{angleToIndex(kAngleLeftMax)};
-
-  const auto compLegCenter{
-      [this](size_t i_0,
-             size_t i_f) -> std::optional<std::pair<double, double>> {
-        size_t num_points{0};
-        double x{0.0};
-        double y{0.0};
-        double angle{};
-        for (auto i{i_0}; i < i_f; ++i) {
-          if (scan_.value().range_min <= scan_.value().ranges[i] &&
-              scan_.value().ranges[i] <= scan_.value().range_max &&
-              scan_.value().intensities[i] >= kIntensityThreshold) {
-            angle = scan_.value().angle_min + i * scan_.value().angle_increment;
-            x += scan_.value().ranges[i] * std::cos(angle);
-            y += scan_.value().ranges[i] * std::sin(angle);
-            ++num_points;
-          }
-        }
-        if (num_points) {
-          return {{x / num_points, y / num_points}};
-        } else {
-          return std::nullopt;
-        }
-      }};
-
-  const auto center_right{compLegCenter(i0, i1)};
-  const auto center_left{compLegCenter(i1, i2)};
-
-  if (center_left && center_right) {
-    Eigen::Isometry3d c = Eigen::Isometry3d::Identity();
-    c.translation() =
-        Eigen::Vector3d{(center_left->first + center_right->first) / 2,
-                        (center_left->second + center_right->second) / 2, 0};
-    Eigen::Vector3d y{-center_left->first + center_right->first,
-                      -center_left->second + center_right->second, 0};
-    y.normalize();
-    Eigen::Vector3d x{-y[1], y[0], 0};
-    Eigen::Vector3d z{0, 0, -1};
-    c.linear() = (Eigen::Matrix3d() << x, y, z).finished().transpose();
-    return c;
-  } else {
-    return std::nullopt;
   }
 }
 
