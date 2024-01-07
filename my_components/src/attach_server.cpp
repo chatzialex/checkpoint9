@@ -88,8 +88,31 @@ void AttachServer::service_cb(
   tf_buffer_->setTransform(odom_to_center, "default_authority", true);
 
   // Perform the movement if requested.
-
-  Eigen::Isometry3d cart_to_goal = Eigen::Isometry3d::Identity();
+  const auto get_fist_goal{
+      [this]() -> std::optional<std::pair<double, double>> {
+        if (const std::optional<Eigen::Isometry3d> robot_to_goal =
+                getTransform(kBaseLinkFrame, kCartFrame);
+            robot_to_goal) {
+          return {{robot_to_goal->translation()[0],
+                   robot_to_goal->translation()[1]}};
+        } else {
+          return std::nullopt;
+        }
+      }};
+  const auto get_second_goal{[this]()
+                                 -> std::optional<std::pair<double, double>> {
+    if (const std::optional<Eigen::Isometry3d> robot_to_goal_frame =
+            getTransform(kBaseLinkFrame, kCartFrame);
+        robot_to_goal_frame) {
+      Eigen::Isometry3d goal_in_goal_frame = Eigen::Isometry3d::Identity();
+      goal_in_goal_frame.translation()[0] = 0.3;
+      Eigen::Isometry3d robot_to_goal{robot_to_goal_frame.value() *
+                                      goal_in_goal_frame};
+      return {{robot_to_goal.translation()[0], robot_to_goal.translation()[1]}};
+    } else {
+      return std::nullopt;
+    }
+  }};
 
   if (!req->attach_to_shelf) {
     goto end;
@@ -98,7 +121,7 @@ void AttachServer::service_cb(
   // Move to center frame
 
   RCLCPP_INFO(this->get_logger(), "Moving towards the center point...");
-  if (!move_to_goal(kCartFrame)) {
+  if (!moveToGoal(get_fist_goal)) {
     RCLCPP_WARN(this->get_logger(), "Moving towards the center point failed.");
     return;
   }
@@ -106,9 +129,7 @@ void AttachServer::service_cb(
   // Move 30cm more
 
   RCLCPP_INFO(this->get_logger(), "Moving 30cm more...");
-
-  cart_to_goal.translation()[0] = 0.3;
-  if (!move_to_goal(kCartFrame, cart_to_goal)) {
+  if (!moveToGoal(get_second_goal)) {
     RCLCPP_WARN(this->get_logger(), "The 30cm forward movement failed.");
     return;
   }
@@ -138,27 +159,22 @@ AttachServer::getTransform(const std::string &source_frame,
   return tf2::transformToEigen(t);
 }
 
-bool AttachServer::move_to_goal(const std::string &dest_frame,
-                                const Eigen::Isometry3d &dest_to_goal) {
-
+bool AttachServer::moveToGoal(
+    std::function<std::optional<std::pair<double, double>>()> getGoal) {
   const auto t_start{std::chrono::steady_clock::now()};
-  std::optional<Eigen::Isometry3d> footprint_to_dest{};
-  Eigen::Isometry3d footprint_to_goal{};
+  std::optional<std::pair<double, double>> goal{};
   double error_distance{};
   double error_yaw{};
 
   while (true) {
-    footprint_to_dest = getTransform(kBaseLinkFrame, dest_frame);
-    if (!footprint_to_dest) {
+    goal = getGoal();
+    if (!goal) {
       return false;
     }
 
-    footprint_to_goal = footprint_to_dest.value() * dest_to_goal;
-
-    error_distance = std::sqrt(std::pow(footprint_to_goal.translation()[0], 2) +
-                               std::pow(footprint_to_goal.translation()[1], 2));
-    error_yaw = std::atan2(footprint_to_goal.translation()[1],
-                           footprint_to_goal.translation()[0]);
+    error_distance =
+        std::sqrt(std::pow(goal->first, 2) + std::pow(goal->second, 2));
+    error_yaw = std::atan2(goal->second, goal->first);
 
     Twist msg{};
     if (error_distance < kGoalPosTol) {

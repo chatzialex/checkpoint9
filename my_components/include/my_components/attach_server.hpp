@@ -21,9 +21,11 @@
 #include <tf2_ros/transform_listener.h>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace my_components {
 
@@ -67,9 +69,8 @@ private:
   std::optional<Eigen::Isometry3d> compCenter();
   std::optional<Eigen::Isometry3d> getTransform(const std::string &source_frame,
                                                 const std::string &dest_frame);
-  bool move_to_goal(
-      const std::string &dest_frame,
-      const Eigen::Isometry3d &dest_to_goal = Eigen::Isometry3d::Identity());
+  bool
+  moveToGoal(std::function<std::optional<std::pair<double, double>>()> getGoal);
 
   rclcpp::Subscription<LaserScan>::SharedPtr subscription_{};
   rclcpp::Publisher<Twist>::SharedPtr publisher_{};
