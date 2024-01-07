@@ -77,10 +77,8 @@ void AttachServer::service_cb(
     return;
   }
 
-  Eigen::Isometry3d odom_to_center_tf;
-  odom_to_center_tf.translation() =
-      (odom_to_scan.value() * scan_to_center.value()).translation();
-  odom_to_center_tf.linear() = odom_to_base_footprint.value().linear();
+  Eigen::Isometry3d odom_to_center_tf{odom_to_scan.value() *
+                                      scan_to_center.value()};
   geometry_msgs::msg::TransformStamped odom_to_center{
       tf2::eigenToTransform(odom_to_center_tf)};
   odom_to_center.header.stamp = this->get_clock()->now();
@@ -180,36 +178,54 @@ bool AttachServer::move_to_goal(const std::string &dest_frame,
 }
 
 std::optional<Eigen::Isometry3d> AttachServer::compCenter() {
-  double center_x{};
-  double center_y{};
-  int num_points{0};
-  double angle_min{};
-  double angle_max{};
-  double angle{};
+  const auto angleToIndex{[this](float angle) {
+    return static_cast<size_t>(
+        std::ceil((angle - scan_->angle_min) / scan_->angle_increment));
+  }};
 
-  for (size_t i{0}; i < scan_.value().ranges.size(); ++i) {
-    // the average of two averages is equal to the average of
-    // all points (because of the linearity of the average)
-    if (scan_.value().range_min <= scan_.value().ranges[i] &&
-        scan_.value().ranges[i] <= scan_.value().range_max &&
-        scan_.value().intensities[i] >= kIntensityThreshold) {
-      angle = scan_.value().angle_min + i * scan_.value().angle_increment;
-      center_x += scan_.value().ranges[i] * std::cos(angle);
-      center_y += scan_.value().ranges[i] * std::sin(angle);
-      // the angles are strictly increasing with i
-      if (!num_points) {
-        angle_min = angle;
-      }
-      angle_max = angle;
-      ++num_points;
-    }
-  }
+  const auto i0{angleToIndex(kAngleRightMin)};
+  const auto i1{angleToIndex(0.0)};
+  const auto i2{angleToIndex(kAngleLeftMax)};
 
-  if (num_points && angle_max - angle_min >= kMinLegsAngularDistance) {
-    Eigen::Isometry3d to_center = Eigen::Isometry3d::Identity();
-    to_center.translation() =
-        Eigen::Vector3d{center_x / num_points, center_y / num_points, 0};
-    return to_center;
+  const auto compLegCenter{
+      [this](size_t i_0,
+             size_t i_f) -> std::optional<std::pair<double, double>> {
+        size_t num_points{0};
+        double x{0.0};
+        double y{0.0};
+        double angle{};
+        for (auto i{i_0}; i < i_f; ++i) {
+          if (scan_.value().range_min <= scan_.value().ranges[i] &&
+              scan_.value().ranges[i] <= scan_.value().range_max &&
+              scan_.value().intensities[i] >= kIntensityThreshold) {
+            angle = scan_.value().angle_min + i * scan_.value().angle_increment;
+            x += scan_.value().ranges[i] * std::cos(angle);
+            y += scan_.value().ranges[i] * std::sin(angle);
+            ++num_points;
+          }
+        }
+        if (num_points) {
+          return {{x / num_points, y / num_points}};
+        } else {
+          return std::nullopt;
+        }
+      }};
+
+  const auto center_right{compLegCenter(i0, i1)};
+  const auto center_left{compLegCenter(i1, i2)};
+
+  if (center_left && center_right) {
+    Eigen::Isometry3d c = Eigen::Isometry3d::Identity();
+    c.translation() =
+        Eigen::Vector3d{(center_left->first + center_right->first) / 2,
+                        (center_left->second + center_right->second) / 2, 0};
+    Eigen::Vector3d y{-center_left->first + center_right->first,
+                      -center_left->second + center_right->second, 0};
+    y.normalize();
+    Eigen::Vector3d x{-y[1], y[0], 0};
+    Eigen::Vector3d z{0, 0, -1};
+    c.linear() = (Eigen::Matrix3d() << x, y, z).finished().transpose();
+    return c;
   } else {
     return std::nullopt;
   }
