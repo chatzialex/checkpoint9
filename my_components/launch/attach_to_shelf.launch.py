@@ -36,6 +36,7 @@ def generate_launch_description():
         attach_server_node,
       ],
       output='screen',
+      parameters = [{"use_sim_time" : use_sim_time}]
     )
 
     return launch.LaunchDescription([

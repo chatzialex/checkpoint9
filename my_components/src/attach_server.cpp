@@ -2,6 +2,7 @@
 
 #include "geometry_msgs/msg/twist.hpp"
 #include "my_components/srv/go_to_loading.hpp"
+#include "rclcpp/logging.hpp"
 #include "rclcpp/qos.hpp"
 #include "rmw/qos_profiles.h"
 #include "rmw/types.h"
@@ -46,8 +47,7 @@ AttachServer::AttachServer(const rclcpp::NodeOptions &options)
       tf_buffer_{std::make_unique<tf2_ros::Buffer>(this->get_clock())},
       tf_listener_{
           std::make_shared<tf2_ros::TransformListener>(*this->tf_buffer_)},
-      tf_static_broadcaster_{
-          std::make_shared<tf2_ros::StaticTransformBroadcaster>(this)},
+      tf_broadcaster_{std::make_shared<tf2_ros::TransformBroadcaster>(this)},
       service_{this->create_service<GoToLoading>(
           kServiceName,
           std::bind(&AttachServer::service_cb, this, std::placeholders::_1,
@@ -65,9 +65,9 @@ void AttachServer::subscription_cb(const std::shared_ptr<const LaserScan> msg) {
     return static_cast<size_t>(
         std::ceil((angle - msg->angle_min) / msg->angle_increment));
   }};
-  const auto i0{angleToIndex(kAngleLeftMin)};
+  const auto i0{0};
   const auto i1{angleToIndex(0.0)};
-  const auto i2{angleToIndex(kAngleRightMax)};
+  const auto i2{msg->ranges.size() - 1};
   const auto compLegCenter{
       [msg](size_t i_0,
             size_t i_f) -> std::optional<std::pair<double, double>> {
@@ -95,41 +95,52 @@ void AttachServer::subscription_cb(const std::shared_ptr<const LaserScan> msg) {
   const auto center_left{compLegCenter(i0, i1)};
   const auto center_right{compLegCenter(i1, i2)};
   if (!center_left) {
-    RCLCPP_WARN(this->get_logger(),
-                "[subscription_cb(): Left leg not detected, returning.]");
-    return;
+    RCLCPP_DEBUG(this->get_logger(),
+                 "[subscription_cb(): Left leg not detected, returning.]");
   }
   if (!center_right) {
-    RCLCPP_WARN(this->get_logger(),
-                "[subscription_cb(): Right leg not detected, returning.]");
-    return;
+    RCLCPP_DEBUG(this->get_logger(),
+                 "[subscription_cb(): Right leg not detected, returning.]");
   }
-  std::optional<Eigen::Isometry3d> pub_to_scan{
-      getTransform(kPublishFrame, kScanFrame)};
-  if (!pub_to_scan) {
+
+  Eigen::Isometry3d pub_to_center;
+  if (center_left && center_right) {
+    std::optional<Eigen::Isometry3d> pub_to_scan{
+        getTransform(kPublishFrame, kScanFrame)};
+    if (!pub_to_scan) {
+      return;
+    }
+    Eigen::Isometry3d scan_to_center = Eigen::Isometry3d::Identity();
+    scan_to_center.translation() =
+        Eigen::Vector3d{(center_left->first + center_right->first) / 2,
+                        (center_left->second + center_right->second) / 2, 0};
+    Eigen::Vector3d y{center_left->first - center_right->first,
+                      center_left->second - center_right->second, 0};
+    y.normalize();
+    Eigen::Vector3d z{-pub_to_scan->linear()(3, {1, 2, 3})};
+    Eigen::Vector3d x{y.cross(z)};
+    scan_to_center.linear() =
+        (Eigen::Matrix3d() << x, y, z).finished().transpose();
+
+    pub_to_center = pub_to_scan.value() * scan_to_center;
+    pub_to_center_ = pub_to_center;
+  } else if (pub_to_center_) {
+    RCLCPP_DEBUG(this->get_logger(),
+                 "subscription_cb(): Publishing cached transform.");
+    pub_to_center = *pub_to_center_;
+  } else {
     return;
   }
 
-  Eigen::Isometry3d scan_to_center = Eigen::Isometry3d::Identity();
-  scan_to_center.translation() =
-      Eigen::Vector3d{(center_left->first + center_right->first) / 2,
-                      (center_left->second + center_right->second) / 2, 0};
-  Eigen::Vector3d y{center_left->first - center_right->first,
-                    center_left->second - center_right->second, 0};
-  y.normalize();
-  Eigen::Vector3d z{-pub_to_scan->linear()(3, {1, 2, 3})};
-  Eigen::Vector3d x{y.cross(z)};
-  scan_to_center.linear() =
-      (Eigen::Matrix3d() << x, y, z).finished().transpose();
-
-  Eigen::Isometry3d pub_to_center{pub_to_scan.value() * scan_to_center};
   geometry_msgs::msg::TransformStamped pub_to_center_msg{
       tf2::eigenToTransform(pub_to_center)};
   pub_to_center_msg.header.stamp = this->get_clock()->now();
   pub_to_center_msg.header.frame_id = kPublishFrame;
   pub_to_center_msg.child_frame_id = kCartFrame;
-  tf_static_broadcaster_->sendTransform(pub_to_center_msg);
-  tf_buffer_->setTransform(pub_to_center_msg, "default_authority", true);
+  tf_broadcaster_->sendTransform(pub_to_center_msg);
+  /*if (!center_published_) {
+    tf_buffer_->setTransform(pub_to_center_msg, "default_authority", true);
+  }*/
   center_published_ = true;
 
   if (publish_mode_ == CenterPublishMode::Once) {
@@ -147,7 +158,7 @@ void AttachServer::service_cb(
   // Publish center frame.
 
   center_published_ = false;
-  publish_mode_ = CenterPublishMode::Once;
+  publish_mode_ = CenterPublishMode::On;
   while (!center_published_) { /*spin*/
   }
 
