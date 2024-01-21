@@ -220,8 +220,9 @@ AttachServer::getTransform(const std::string &source_frame,
                            const std::string &dest_frame) {
   geometry_msgs::msg::TransformStamped t{};
   try {
-    t = tf_buffer_->lookupTransform(source_frame, dest_frame,
-                                    tf2::TimePointZero);
+    t = tf_buffer_->lookupTransform(
+        source_frame, dest_frame,
+        rclcpp::Time(0, 0, this->get_clock()->get_clock_type()));
   } catch (const tf2::TransformException &ex) {
     RCLCPP_WARN(this->get_logger(),
                 "getTransform(): Could not get transform from %s to %s: %s",
@@ -241,29 +242,30 @@ bool AttachServer::moveToGoal(
 
   while (true) {
     goal = getGoal();
-    if (!goal) {
+
+    if (goal) {
+      error_distance =
+          std::sqrt(std::pow(goal->first, 2) + std::pow(goal->second, 2));
+      error_yaw = std::atan2(goal->second, goal->first);
+      if (error_distance < kGoalPosTol) {
+        publisher_->publish(Twist{});
+        return true;
+      }
+      Twist msg{};
+      msg.angular.z = kKpYaw * error_yaw;
+      msg.linear.x = kKpDdistance * error_distance;
+      publisher_->publish(msg);
+    } else {
       RCLCPP_WARN(this->get_logger(),
                   "moveToGoal(): Could not get transform to goal.");
-      return false;
+      publisher_->publish(Twist{});
     }
 
-    error_distance =
-        std::sqrt(std::pow(goal->first, 2) + std::pow(goal->second, 2));
-    error_yaw = std::atan2(goal->second, goal->first);
-
-    Twist msg{};
-    if (error_distance < kGoalPosTol) {
-      publisher_->publish(msg);
-      return true;
-    }
     if (std::chrono::steady_clock::now() - t_start > kMotionTimeout) {
       RCLCPP_WARN(this->get_logger(), "[move_goal()] Timed out.");
-      publisher_->publish(msg);
+      publisher_->publish(Twist{});
       return false;
     }
-    msg.angular.z = kKpYaw * error_yaw;
-    msg.linear.x = kKpDdistance * error_distance;
-    publisher_->publish(msg);
     std::this_thread::sleep_for(kTimerPeriod);
   }
 }
