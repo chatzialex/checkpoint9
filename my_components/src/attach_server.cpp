@@ -9,7 +9,7 @@
 #include "std_msgs/msg/detail/string__struct.hpp"
 #include "std_msgs/msg/string.hpp"
 
-#include <tf2_eigen/tf2_eigen.h>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 #include <cmath>
 #include <cstddef>
@@ -65,11 +65,9 @@ void AttachServer::subscription_cb(const std::shared_ptr<const LaserScan> msg) {
     return static_cast<size_t>(
         std::ceil((angle - msg->angle_min) / msg->angle_increment));
   }};
-
-  const auto i0{angleToIndex(kAngleRightMin)};
+  const auto i0{angleToIndex(kAngleLeftMin)};
   const auto i1{angleToIndex(0.0)};
-  const auto i2{angleToIndex(kAngleLeftMax)};
-
+  const auto i2{angleToIndex(kAngleRightMax)};
   const auto compLegCenter{
       [msg](size_t i_0,
             size_t i_f) -> std::optional<std::pair<double, double>> {
@@ -83,7 +81,7 @@ void AttachServer::subscription_cb(const std::shared_ptr<const LaserScan> msg) {
               msg->intensities[i] >= kIntensityThreshold) {
             angle = msg->angle_min + i * msg->angle_increment;
             x += msg->ranges[i] * std::cos(angle);
-            y += -msg->ranges[i] * std::sin(angle);
+            y += msg->ranges[i] * std::sin(angle);
             ++num_points;
           }
         }
@@ -94,17 +92,21 @@ void AttachServer::subscription_cb(const std::shared_ptr<const LaserScan> msg) {
         }
       }};
 
-  const auto center_right{compLegCenter(i0, i1)};
-  const auto center_left{compLegCenter(i1, i2)};
-
+  const auto center_left{compLegCenter(i0, i1)};
+  const auto center_right{compLegCenter(i1, i2)};
   if (!center_left) {
     RCLCPP_WARN(this->get_logger(),
-                "[subscription_cb() Left leg not detected, returning.]");
+                "[subscription_cb(): Left leg not detected, returning.]");
     return;
   }
   if (!center_right) {
     RCLCPP_WARN(this->get_logger(),
-                "[subscription_cb() Right leg not detected, returning.]");
+                "[subscription_cb(): Right leg not detected, returning.]");
+    return;
+  }
+  std::optional<Eigen::Isometry3d> pub_to_scan{
+      getTransform(kPublishFrame, kScanFrame)};
+  if (!pub_to_scan) {
     return;
   }
 
@@ -115,25 +117,19 @@ void AttachServer::subscription_cb(const std::shared_ptr<const LaserScan> msg) {
   Eigen::Vector3d y{center_left->first - center_right->first,
                     center_left->second - center_right->second, 0};
   y.normalize();
-  Eigen::Vector3d x{-y[1], y[0], 0};
-  Eigen::Vector3d z{0, 0, -1};
+  Eigen::Vector3d z{-pub_to_scan->linear()(3, {1, 2, 3})};
+  Eigen::Vector3d x{y.cross(z)};
   scan_to_center.linear() =
       (Eigen::Matrix3d() << x, y, z).finished().transpose();
 
-  std::optional<Eigen::Isometry3d> pub_to_scan{
-      getTransform(kPublishFrame, kLaserFrame)};
-  if (!pub_to_scan) {
-    return;
-  }
-
-  Eigen::Isometry3d pub_to_center_tf{pub_to_scan.value() * scan_to_center};
-  geometry_msgs::msg::TransformStamped pub_to_center{
-      tf2::eigenToTransform(pub_to_center_tf)};
-  pub_to_center.header.stamp = this->get_clock()->now();
-  pub_to_center.header.frame_id = kPublishFrame;
-  pub_to_center.child_frame_id = kCartFrame;
-  tf_static_broadcaster_->sendTransform(pub_to_center);
-  tf_buffer_->setTransform(pub_to_center, "default_authority", true);
+  Eigen::Isometry3d pub_to_center{pub_to_scan.value() * scan_to_center};
+  geometry_msgs::msg::TransformStamped pub_to_center_msg{
+      tf2::eigenToTransform(pub_to_center)};
+  pub_to_center_msg.header.stamp = this->get_clock()->now();
+  pub_to_center_msg.header.frame_id = kPublishFrame;
+  pub_to_center_msg.child_frame_id = kCartFrame;
+  tf_static_broadcaster_->sendTransform(pub_to_center_msg);
+  tf_buffer_->setTransform(pub_to_center_msg, "default_authority", true);
   center_published_ = true;
 
   if (publish_mode_ == CenterPublishMode::Once) {
@@ -156,33 +152,28 @@ void AttachServer::service_cb(
   }
 
   // Perform the movement if requested.
-  const auto get_fist_goal{
-      [this]() -> std::optional<std::pair<double, double>> {
-        if (const std::optional<Eigen::Isometry3d> robot_to_goal =
-                getTransform(kBaseLinkFrame, kCartFrame);
-            robot_to_goal) {
-          return {{robot_to_goal->translation()[0],
-                   robot_to_goal->translation()[1]}};
-        } else {
-          return std::nullopt;
-        }
-      }};
-  const auto get_second_goal{[this]()
-                                 -> std::optional<std::pair<double, double>> {
-    if (const std::optional<Eigen::Isometry3d> robot_to_goal_frame =
-            getTransform(kBaseLinkFrame, kCartFrame);
-        robot_to_goal_frame) {
-      Eigen::Isometry3d goal_in_goal_frame = Eigen::Isometry3d::Identity();
-      goal_in_goal_frame.translation()[0] = 0.3;
-      Eigen::Isometry3d robot_to_goal{robot_to_goal_frame.value() *
-                                      goal_in_goal_frame};
-      return {{robot_to_goal.translation()[0], robot_to_goal.translation()[1]}};
-    } else {
+
+  const auto get_fist_goal{[this]()
+                               -> std::optional<std::pair<double, double>> {
+    const auto base_to_cart{getTransform(kBaseLinkFrame, kCartFrame)};
+    if (!base_to_cart) {
       return std::nullopt;
     }
+    return {{base_to_cart->translation()[0], base_to_cart->translation()[1]}};
   }};
+  const auto get_second_goal{
+      [this]() -> std::optional<std::pair<double, double>> {
+        const auto base_to_cart = getTransform(kBaseLinkFrame, kCartFrame);
+        if (!base_to_cart) {
+          return std::nullopt;
+        }
+        Eigen::Isometry3d cart_to_goal = Eigen::Isometry3d::Identity();
+        cart_to_goal.translate(Eigen::Vector3d{0.3, 0.0, 0.0});
+        const Eigen::Isometry3d base_to_goal{*base_to_cart * cart_to_goal};
+        return {{base_to_goal.translation()[0], base_to_goal.translation()[1]}};
+      }};
 
-  if (/*!req->attach_to_shelf*/ true) {
+  if (!req->attach_to_shelf) {
     goto end;
   }
 
@@ -221,8 +212,10 @@ AttachServer::getTransform(const std::string &source_frame,
     t = tf_buffer_->lookupTransform(source_frame, dest_frame,
                                     tf2::TimePointZero);
   } catch (const tf2::TransformException &ex) {
-    RCLCPP_WARN(this->get_logger(), "Could not transform %s to %s: %s",
+    RCLCPP_WARN(this->get_logger(),
+                "getTransform(): Could not get transform from %s to %s: %s",
                 source_frame.c_str(), dest_frame.c_str(), ex.what());
+
     return std::nullopt;
   }
   return tf2::transformToEigen(t);
@@ -238,6 +231,8 @@ bool AttachServer::moveToGoal(
   while (true) {
     goal = getGoal();
     if (!goal) {
+      RCLCPP_WARN(this->get_logger(),
+                  "moveToGoal(): Could not get transform to goal.");
       return false;
     }
 

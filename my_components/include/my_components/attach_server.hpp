@@ -17,7 +17,7 @@
 #include "rclcpp/subscription.hpp"
 
 #include "tf2_ros/static_transform_broadcaster.h"
-#include <tf2_eigen/tf2_eigen.h>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
@@ -53,12 +53,12 @@ private:
 
   constexpr static char kOdomFrame[]{"odom"};
   constexpr static char kBaseLinkFrame[]{"robot_base_link"};
-  constexpr static char kLaserFrame[]{"robot_front_laser_base_link"};
+  constexpr static char kScanFrame[]{"robot_front_laser_base_link"};
   constexpr static char kCartFrame[]{"cart_frame"};
   constexpr static char kPublishFrame[]{"odom"};
 
-  constexpr static double kAngleLeftMax{1.5708};   // [rad]
-  constexpr static double kAngleRightMin{-1.5708}; // [rad]
+  constexpr static double kAngleLeftMin{-1.5708}; // [rad]
+  constexpr static double kAngleRightMax{1.5708}; // [rad]
   constexpr static auto kTimerPeriod{100ms};
   constexpr static double kIntensityThreshold{8000};
   constexpr static double kMinLegsAngularDistance{0.5};
